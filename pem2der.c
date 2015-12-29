@@ -376,7 +376,7 @@ void manage_pem(unsigned char *data_in, const unsigned char *usalt,
 			unsigned char *pem_salt = NULL;
 			size_t pem_salt_len;
 			pem_salt = read_hexa(str_salt, &pem_salt, &pem_salt_len);
-			if (str_salt != NULL && (pem_salt == NULL || pem_salt_len != SALT_LEN))
+			if (str_salt != NULL && (pem_salt == NULL))
 				error_stop("Incorrect salt found in PEM: %s", str_salt);
 			salt = pem_salt;
 			if (usalt != NULL && salt == NULL)
