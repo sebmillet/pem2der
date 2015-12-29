@@ -34,12 +34,6 @@
 char *file_in = NULL;
 char *file_out = NULL;
 
-	/* Length in BYTES */
-#define SALT_LEN 8
-char *opt_salt = NULL;
-
-const char *opt_cipher = NULL;
-
 char *opt_password = NULL;
 
 void usage()
@@ -327,8 +321,7 @@ error:
 	return 0;
 }
 
-void manage_pem(unsigned char *data_in, const unsigned char *usalt,
-		unsigned char **data_out, size_t *data_out_len)
+void manage_pem(unsigned char *data_in, unsigned char **data_out, size_t *data_out_len)
 {
 	*data_out = NULL;
 	*data_out_len = 0;
@@ -341,9 +334,13 @@ void manage_pem(unsigned char *data_in, const unsigned char *usalt,
 	int status;
 	int pem_index = 0;
 	while (pem_next(data_in, &data_in, &blen, &pem_header, &str_cipher, &str_salt, &data_next, &status)) {
+
+		unsigned char *data_src = NULL;
+		size_t data_src_len = 0;
+
 		++pem_index;
 		if (status != PEM_ENCRYPTED_DATA && status != PEM_BLANK_DATA) {
-			fprintf(stderr, "[%s] (skipped due to PEM analyzis error)", pem_header);
+			fprintf(stderr, "[%s] (skipped due to PEM analyzis error)\n", pem_header);
 			data_in = data_next;
 			continue;
 		}
@@ -361,94 +358,98 @@ void manage_pem(unsigned char *data_in, const unsigned char *usalt,
 
 		size_t der_len = pem_base64_estimate_decoded_data_len(data_in, blen);
 		unsigned char *der = (unsigned char *)malloc(der_len);
-		if (!pem_base64_decode(data_in, blen, &der, &der_len))
-			error_stop("Error decoding BASE64");
+		if (!pem_base64_decode(data_in, blen, &der, &der_len)) {
+			fprintf(stderr, "Error decoding BASE64\n");
+			goto post_encryption;
+		}
 
-		unsigned char *data_src = der;
-		size_t data_src_len = der_len;
+		data_src = der;
+		data_src_len = der_len;
 
-		if (status == PEM_ENCRYPTED_DATA) {
-			if (opt_cipher != NULL)
-				fprintf(stderr, "Warning: ignoring cipher provided as an option, using PEM's\n");
-			if (usalt != NULL && str_salt != NULL)
-				fprintf(stderr, "Warning: ignoring salt provided as an option, using PEM's\n");
-			const unsigned char *salt = NULL;
-			unsigned char *pem_salt = NULL;
-			size_t pem_salt_len;
-			pem_salt = read_hexa(str_salt, &pem_salt, &pem_salt_len);
-			if (str_salt != NULL && (pem_salt == NULL))
-				error_stop("Incorrect salt found in PEM: %s", str_salt);
-			salt = pem_salt;
-			if (usalt != NULL && salt == NULL)
-				salt = usalt;
+		if (status != PEM_ENCRYPTED_DATA)
+			goto post_encryption;
 
-			unsigned char *key;
-			unsigned char *iv;
-			const EVP_CIPHER *cipher;
+		data_src = NULL;
 
-			if (manage_password(salt, str_cipher, &key, &iv, &cipher)) {
-				EVP_CIPHER_CTX *ctx;
-				if (!(ctx = EVP_CIPHER_CTX_new()))
-					error_stop("manage_pem(): EVP_CIPHER_CTX_new() returned NULL");
+		unsigned char *pem_salt = NULL;
+		size_t pem_salt_len;
+		pem_salt = read_hexa(str_salt, &pem_salt, &pem_salt_len);
+		if (str_salt != NULL && (pem_salt == NULL)) {
+			fprintf(stderr, "Incorrect salt found in PEM: %s\n", str_salt);
+			goto post_encryption;
+		}
 
-				unsigned char *out = malloc(der_len + 256);
+		unsigned char *key;
+		unsigned char *iv;
+		const EVP_CIPHER *cipher;
 
-				if (EVP_DecryptInit_ex(ctx, cipher, NULL, key, (unsigned char *)salt) != 1)
-					error_stop("ECP_DecryptInit_ex() did not return 1");
+		if (!manage_password(pem_salt, str_cipher, &key, &iv, &cipher))
+			goto post_encryption;
 
-				int outl;
-				int out_len;
+		EVP_CIPHER_CTX *ctx;
+		if (!(ctx = EVP_CIPHER_CTX_new())) {
+			fprintf(stderr, "Error decrypting! (1)\n");
+			goto post_encryption;
+		}
 
-				if (EVP_DecryptUpdate(ctx, out, &outl, der, der_len) != 1)
-					error_stop("EVP_DecryptUpdate() did not return 1");
-				int final_outl;
-				if (EVP_DecryptFinal_ex(ctx, out + outl, &final_outl) != 1)
-					error_stop("EVP_DecryptFinal_ex() did not return 1");
-				out_len = outl + final_outl;
+		unsigned char *out = malloc(der_len + 256);
 
-				fprintf(stderr, "Decrypted data length: %i\n", out_len);
-				EVP_CIPHER_CTX_free(ctx);
-				free(key);
-				free(iv);
+		if (EVP_DecryptInit_ex(ctx, cipher, NULL, key, (unsigned char *)pem_salt) != 1) {
+			fprintf(stderr, "Error decrypting! (2)\n");
+			goto post_encryption;
+		}
 
-				data_src = out;
-				data_src_len = out_len;
+		int outl;
+		int out_len;
 
+		if (EVP_DecryptUpdate(ctx, out, &outl, der, der_len) != 1) {
+			fprintf(stderr, "Could not decrypt, don't know why\n");
+			goto post_encryption;
+		}
+		int final_outl;
+		if (EVP_DecryptFinal_ex(ctx, out + outl, &final_outl) != 1) {
+			fprintf(stderr, "Could not decrypt, bad password\n");
+			goto post_encryption;
+		}
+		out_len = outl + final_outl;
+
+		EVP_CIPHER_CTX_free(ctx);
+		free(key);
+		free(iv);
+
+		data_src = out;
+		data_src_len = out_len;
+
+post_encryption:
+
+		if (data_src != NULL) {
+			unsigned char *target;
+			if (*data_out == NULL) {
+				*data_out = malloc(data_src_len);
+				target = *data_out;
+				*data_out_len = 0;
 			} else {
-				data_src = NULL;
+				*data_out = realloc(*data_out, *data_out_len + data_src_len);
+				target = *data_out + *data_out_len;
 			}
+			memcpy(target, data_src, data_src_len);
+			*data_out_len += data_src_len;
 		}
-		unsigned char *target;
-		if (*data_out == NULL) {
-			*data_out = malloc(data_src_len);
-			target = *data_out;
-			*data_out_len = 0;
-		} else {
-			*data_out = realloc(*data_out, *data_out_len + data_src_len);
-			target = *data_out + *data_out_len;
-		}
-		memcpy(target, data_src, data_src_len);
-		*data_out_len += data_src_len;
 
 		data_in = data_next;
 	}
 	if (pem_index == 0) {
-		if (status == PEM_NO_PEM_INFORMATION)
-			error_stop("No PEM information in file %s", file_in);
-		else
-			error_stop("Unable to parse PEM information in file %s", file_in);
+		if (status == PEM_NO_PEM_INFORMATION) {
+			fprintf(stderr, "No PEM information in file %s\n", file_in);
+		} else {
+			fprintf(stderr, "Unable to parse PEM information in file %s\n", file_in);
+		}
 	}
 }
 
 int main(int argc, char **argv)
 {
 	parse_options(argc, argv);
-
-	unsigned char *salt = NULL;
-	size_t salt_len;
-	salt = read_hexa(opt_salt, &salt, &salt_len);
-	if (opt_salt != NULL && (salt == NULL || salt_len != SALT_LEN))
-		error_stop("Incorrect salt: %s", opt_salt);
 
 	ssize_t bufin_len = file_size(file_in);
 	if (bufin_len < 0)
@@ -468,7 +469,7 @@ int main(int argc, char **argv)
 	unsigned char *bufout;
 	size_t bufout_len = 0;
 
-	manage_pem(bufin, salt, &bufout, &bufout_len);
+	manage_pem(bufin, &bufout, &bufout_len);
 
 	fprintf(stderr, "Output data length: %lu\n", bufout_len);
 

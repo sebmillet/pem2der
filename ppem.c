@@ -124,7 +124,7 @@ int pem_next(unsigned char *b, unsigned char **bstart, size_t *blen, char **pem_
 						while (isblank(*h2))
 							++h2;
 						*cipher = (char *)h2;
-						while (*h2 != '\0' && *h2 != ',' && !isblank(*h2))
+						while (*h2 != '\0' && *h2 != ',' && !isblank(*h2) && *h2 != '\r' && *h2 != '\n')
 							++h2;
 						unsigned char *cipher_set0 = h2;
 						unsigned char *salt_set0 = NULL;
@@ -151,12 +151,10 @@ int pem_next(unsigned char *b, unsigned char **bstart, size_t *blen, char **pem_
 								*salt = NULL;
 								salt_set0 = NULL;
 							}
-							if (cipher_set0 != NULL) {
-								*cipher_set0 = '\0';
-								if (salt_set0 != NULL)
-									*salt_set0 = '\0';
-								*bstart = h2;
-							}
+							*cipher_set0 = '\0';
+							if (salt_set0 != NULL)
+								*salt_set0 = '\0';
+							*bstart = h2;
 						}
 					}
 				}
