@@ -340,7 +340,7 @@ void manage_pem(unsigned char *data_in, unsigned char **data_out, size_t *data_o
 
 		++pem_index;
 		if (status != PEM_ENCRYPTED_DATA && status != PEM_BLANK_DATA) {
-			fprintf(stderr, "[%s] (skipped due to PEM analyzis error)\n", pem_header);
+			fprintf(stderr, "[%s] (skipped: %s)\n", pem_header, pem_errorstring(status));
 			data_in = data_next;
 			continue;
 		}
@@ -375,7 +375,7 @@ void manage_pem(unsigned char *data_in, unsigned char **data_out, size_t *data_o
 		size_t pem_salt_len;
 		pem_salt = read_hexa(str_salt, &pem_salt, &pem_salt_len);
 		if (str_salt != NULL && (pem_salt == NULL)) {
-			fprintf(stderr, "Incorrect salt found in PEM: %s\n", str_salt);
+			fprintf(stderr, "Incorrect salt: '%s'\n", str_salt);
 			goto post_encryption;
 		}
 
@@ -388,14 +388,14 @@ void manage_pem(unsigned char *data_in, unsigned char **data_out, size_t *data_o
 
 		EVP_CIPHER_CTX *ctx;
 		if (!(ctx = EVP_CIPHER_CTX_new())) {
-			fprintf(stderr, "Error decrypting! (1)\n");
+			fprintf(stderr, "Internal error decrypting! (1)\n");
 			goto post_encryption;
 		}
 
 		unsigned char *out = malloc(der_len + 256);
 
 		if (EVP_DecryptInit_ex(ctx, cipher, NULL, key, (unsigned char *)pem_salt) != 1) {
-			fprintf(stderr, "Error decrypting! (2)\n");
+			fprintf(stderr, "Internal error decrypting! (2)\n");
 			goto post_encryption;
 		}
 
@@ -403,12 +403,12 @@ void manage_pem(unsigned char *data_in, unsigned char **data_out, size_t *data_o
 		int out_len;
 
 		if (EVP_DecryptUpdate(ctx, out, &outl, der, der_len) != 1) {
-			fprintf(stderr, "Could not decrypt, don't know why\n");
+			fprintf(stderr, "Internal eecryption error! (3)\n");
 			goto post_encryption;
 		}
 		int final_outl;
 		if (EVP_DecryptFinal_ex(ctx, out + outl, &final_outl) != 1) {
-			fprintf(stderr, "Could not decrypt, bad password\n");
+			fprintf(stderr, "Decryption error\n");
 			goto post_encryption;
 		}
 		out_len = outl + final_outl;

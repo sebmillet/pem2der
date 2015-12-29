@@ -15,6 +15,8 @@
  * =====================================================================================
  */
 
+/*#define DEBUG*/
+
 #include "ppem.h"
 
 #include <ctype.h>
@@ -23,6 +25,17 @@
 #include <openssl/evp.h>
 
 #define UNUSED(x) (void)(x)
+
+#ifdef DEBUG
+#define DBG(...) \
+{\
+	fprintf(stderr, "%s[%d]\t", __FILE__, __LINE__); \
+	fprintf(stderr, __VA_ARGS__); \
+	fprintf(stderr, "\n"); \
+}
+#else
+#define DBG(...)
+#endif
 
 	/*
 	 * Needed by FATAL_ERROR macro
@@ -36,7 +49,18 @@
 	exit(1); \
 }
 
-unsigned char *strleftis(unsigned char *buf, const char *left)
+static const char *errorstrings[] = {
+	"no PEM information",					/* PEM_NO_PEM_INFORMATION */
+	"PEM parsing error",					/* PEM_PARSE_ERROR */
+	"unmanaged PEM format",					/* PEM_UNMANAGED_PROC_TYPE */
+	"missing encryption information"	,	/* PEM_MISSING_ENCRYPTION_INFORMATION */
+	"non standard encryption information",	/* PEM_MISSING_EMPTY_LINE_AFTER_ENCRYPTION_INFO */
+	"empty data",							/* PEM_EMPTY_DATA */
+	"encrypted data",						/* PEM_ENCRYPTED_DATA */
+	"blank data"							/* PEM_BLANK_DATA */
+};
+
+static unsigned char *strleftis(unsigned char *buf, const char *left)
 {
 	while (*left != '\0' && toupper(*left) == toupper(*buf)) {
 		++buf;
@@ -47,7 +71,7 @@ unsigned char *strleftis(unsigned char *buf, const char *left)
 	return NULL;
 }
 
-unsigned char *strrightis(unsigned char *buf, unsigned char **buf_nextline, const char *right)
+static unsigned char *strrightis(unsigned char *buf, unsigned char **buf_nextline, const char *right)
 {
 	unsigned char *p = buf;
 	while (*p != '\0' && *p != '\n' && (*p != '\r' || p[1] != '\n'))
@@ -75,14 +99,28 @@ unsigned char *strrightis(unsigned char *buf, unsigned char **buf_nextline, cons
 	return NULL;
 }
 
+const char *pem_errorstring(int e)
+{
+	if ((size_t)e >= sizeof(errorstrings) / sizeof(*errorstrings))
+		return NULL;
+	else
+		return errorstrings[e];
+}
+
 int pem_next(unsigned char *b, unsigned char **bstart, size_t *blen, char **pem_header,
 			char **cipher, char **salt, unsigned char **bnext, int *status)
 {
+
+	DBG("pem_next(): start")
+
 	*pem_header = NULL;
 	*bstart = NULL;
 	*blen = 0;
 	*cipher = NULL;
 	*salt = NULL;
+
+	unsigned char *cipher_set0 = NULL;
+	unsigned char *salt_set0 = NULL;
 
 	unsigned char *nextline;
 	do {
@@ -92,19 +130,34 @@ int pem_next(unsigned char *b, unsigned char **bstart, size_t *blen, char **pem_
 		if (header != NULL && fin != NULL && header < fin) {
 			*fin = '\0';
 			*pem_header = (char *)header;
+
+			DBG("Found header opening '%s'", *pem_header)
+
 			break;
 		}
 	} while (nextline != NULL);
+
 	if (nextline == NULL) {
-		*status = (*pem_header != NULL ? PEM_COULD_NOT_PARSE : PEM_NO_PEM_INFORMATION);
+		if (*pem_header == NULL) {
+			DBG("Status set to PEM_NO_PEM_INFORMATION")
+			*status = PEM_NO_PEM_INFORMATION;
+		} else {
+			DBG("Status set to PEM_PARSE_ERROR")
+			*status = PEM_PARSE_ERROR;
+		}
+		DBG("pem_next(): returning 0")
 		return 0;
 	}
 
-	int has_proc_type_header = 0;
-	int has_proc_type_header_set_for_encryption = 0;
 	unsigned char *header = strleftis(b, "proc-type:");
-	if (header != NULL) {
-		has_proc_type_header = 1;
+	int has_proc_type = 0;
+	int proc_type_is_set_for_encryption = 0;
+
+	if (header == NULL) {
+		DBG("No Proc-Type in the line next to header: assuming blank data")
+	} else {
+		DBG("Found Proc-Type in the line next to header")
+		has_proc_type = 1;
 		while (isblank(*header))
 			++header;
 		if (*header == '4') {
@@ -116,99 +169,143 @@ int pem_next(unsigned char *b, unsigned char **bstart, size_t *blen, char **pem_
 				while (isblank(*header))
 					++header;
 				unsigned char *fin = strrightis(header, &nextline, "encrypted");
-				b = nextline;
 				if (header == fin && nextline != NULL) {
-					has_proc_type_header_set_for_encryption = 1;
+					proc_type_is_set_for_encryption = 1;
+
+					DBG("Proc-Type content is set for encryption ('4,ENCRYPTED')")
+
+					b = nextline;
 					unsigned char *h2;
 					if ((h2 = strleftis(b, "dek-info:")) != NULL) {
+
+						DBG("Found Dek-Info")
+
 						while (isblank(*h2))
 							++h2;
 						*cipher = (char *)h2;
 						while (*h2 != '\0' && *h2 != ',' && !isblank(*h2) && *h2 != '\r' && *h2 != '\n')
 							++h2;
-						unsigned char *cipher_set0 = h2;
-						unsigned char *salt_set0 = NULL;
+						cipher_set0 = h2;
 						while (isblank(*h2))
 							++h2;
-						int with_salt = (*h2 == ',');
-						if (*h2 != '\0') {
-							if (with_salt) {
+						if (*h2 == ',') {
+							++h2;
+							while (isblank(*h2))
 								++h2;
-								while (isblank(*h2))
-									++h2;
-								*salt = (char *)h2;
-								while (isxdigit(*h2))
-									++h2;
-								salt_set0 = h2;
-								while (isblank(*h2))
-									++h2;
-							}
-							if (*h2 == '\n' && h2[1] == '\n') {
-								h2 += 2;
-							} else if (*h2 == '\r' && h2[1] == '\n' && h2[2] == '\r' && h2[3] == '\n') {
-								h2 += 4;
-							} else {
-								*salt = NULL;
-								salt_set0 = NULL;
-							}
-							*cipher_set0 = '\0';
-							if (salt_set0 != NULL)
-								*salt_set0 = '\0';
-							*bstart = h2;
+							*salt = (char *)h2;
+							while (*h2 != '\0' && *h2 != '\r' && *h2 != '\n')
+								++h2;
+							--h2;
+							while (isblank(*h2) && (char *)h2 >= *salt)
+								--h2;
+							salt_set0 = h2 + 1;
+
+							DBG("Found salt")
+
 						}
 					}
 				}
 			}
 		}
-	} else {
-		*bstart = b;
 	}
 
-	if (has_proc_type_header && !has_proc_type_header_set_for_encryption && *bstart == NULL) {
-		*cipher = NULL;
-		*salt = NULL;
-		while (*header != '\0') {
-			if (*header == '\n' && header[1] == '\n') {
-				*bstart = header + 2;
-				break;
-			} else if (*header == '\r' && header[1] == '\n' && header[2] == '\r' && header[3] == '\n') {
-				*bstart = header + 4;
-				break;
+/*    DBG("A- b: [%c] %d, [%c] %d, [%c] %d, [%c] %d, [%c] %d", b[0], b[0], b[1], b[1], b[2], b[2], b[3], b[3], b[4], b[4])*/
+
+	int got_empty_line_after_dek_info = 0;
+	if (has_proc_type && *cipher != NULL) {
+		strrightis(b, &nextline, "");
+		if (nextline != NULL) {
+			b = nextline;
+			if (b[0] == '\n') {
+				got_empty_line_after_dek_info = 1;
+				DBG("Empty line (as expected) after Dek-Info")
+				b += 1;
+			} else if (b[0] == '\r' && b[1] == '\n') {
+				got_empty_line_after_dek_info = 1;
+				DBG("Empty line (as expected) after Dek-Info (CR-LF format)")
+				b += 2;
+			} else {
+				DBG("Missing empty line after Dek-Info")
 			}
-			++header;
 		}
 	}
 
-	unsigned char *bend = (*bstart == NULL ? b : *bstart);
+	if (*cipher != NULL) {
+		*cipher_set0 = '\0';
+		if (!strlen(*cipher))
+			*cipher = NULL;
+		if (*salt != NULL) {
+			*salt_set0 = '\0';
+			if (!strlen(*salt))
+				*salt = NULL;
+		}
+	}
 
-	unsigned char *h3;
+	while (*b == '\n' || (*b == '\r' && b[1] == '\n'))
+		b += (*b == '\n' ? 1 : 2);
+	*bstart = b;
+
+	int got_closed = 0;
 	do {
-		h3 = strleftis(bend, "-----end ");
-		unsigned char *fin = strrightis(bend, &nextline, "-----");
-		if (h3 != NULL && fin != NULL && h3 < fin) {
+		unsigned char *h = strleftis(b, "-----end ");
+		unsigned char *fin = strrightis(b, &nextline, "-----");
+		if (h != NULL && fin != NULL && h < fin) {
 			*fin = '\0';
+			got_closed = 1;
+			DBG("Found header closure '%s'", h)
 			break;
 		}
-		bend = nextline;
+		b = nextline;
 	} while (nextline != NULL);
-	if (h3 == NULL) {
-		*status = PEM_COULD_NOT_PARSE;
-		return 0;
-	}
-
 	*bnext = nextline;
-	if (*bstart != NULL) {
+
+	int retval = got_closed;
+
+	if (got_closed) {
 			/*
 			 * Not a typo.
 			 * Normally blen is 'arrival - beginning + 1' but here,
-			 * arrival is 'bend - 1' so -1 + 1 => no '+ 1' term.
+			 * arrival is 'b - 1' so -1 + 1 => no '+ 1' term.
 			 * */
-		*blen = bend - *bstart;
-		*status = (*cipher != NULL ? PEM_ENCRYPTED_DATA : PEM_BLANK_DATA);
+		*blen = b - *bstart;
+		if (has_proc_type && *cipher == NULL) {
+
+			if (proc_type_is_set_for_encryption) {
+				DBG("Status set to PEM_MISSING_ENCRYPTION_INFORMATION")
+				*status = PEM_MISSING_ENCRYPTION_INFORMATION;
+			} else {
+				DBG("Status set to PEM_UNMANAGED_PROC_TYPE")
+				*status = PEM_UNMANAGED_PROC_TYPE;
+			}
+		} else if (*cipher == NULL) {
+			if (*blen == 0) {
+				DBG("Status set to PEM_EMPTY_DATA")
+				*status = PEM_EMPTY_DATA;
+			} else {
+				DBG("Status set to PEM_BLANK_DATA")
+				*status = PEM_BLANK_DATA;
+			}
+		} else {
+			if (*blen == 0) {
+				DBG("Status set to PEM_EMPTY_DATA")
+				*status = PEM_EMPTY_DATA;
+			} else if (got_empty_line_after_dek_info) {
+				DBG("Status set to PEM_ENCRYPTED_DATA")
+				*status = PEM_ENCRYPTED_DATA;
+			} else {
+				DBG("Status set to PEM_MISSING_EMPTY_LINE_AFTER_ENCRYPTION_INFO")
+				*status = PEM_MISSING_EMPTY_LINE_AFTER_ENCRYPTION_INFO;
+			}
+		}
 	} else {
-		*status = PEM_COULD_NOT_PARSE;
+		DBG("Status set to PEM_PARSE_ERROR")
+		*status = PEM_PARSE_ERROR;
 	}
-	return 1;
+
+	DBG("*bstart = %lu, *blen = %lu, *bnext = %lu", (long unsigned int)*bstart, (long unsigned int)*blen, (long unsigned int)*bnext)
+
+	DBG("pem_next(): returning %d", retval)
+	return retval;
 }
 
 int pem_base64_estimate_decoded_data_len(const unsigned char* b64msg, size_t b64msg_len)

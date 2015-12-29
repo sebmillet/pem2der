@@ -1,3 +1,3 @@
 [EC PRIVATE KEY] (encrypted with AES-128-CBC, salt: 10800BBDA05EBA2C1B7B481A94A8BA28)
-Could not decrypt, bad password
+Decryption error
 Output data length: 0

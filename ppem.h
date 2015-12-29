@@ -17,10 +17,18 @@
 
 #include <stdlib.h>
 
-enum {PEM_COULD_NOT_PARSE, PEM_NO_PEM_INFORMATION, PEM_ENCRYPTED_DATA, PEM_BLANK_DATA};
+enum {
+	PEM_NO_PEM_INFORMATION,
+	PEM_PARSE_ERROR,
+	PEM_UNMANAGED_PROC_TYPE,
+	PEM_MISSING_ENCRYPTION_INFORMATION,
+	PEM_MISSING_EMPTY_LINE_AFTER_ENCRYPTION_INFO,
+	PEM_EMPTY_DATA,
+	PEM_ENCRYPTED_DATA,
+	PEM_BLANK_DATA
+};
 
-unsigned char *strleftis(unsigned char *buf, const char *left);
-unsigned char *strrightis(unsigned char *buf, unsigned char **buf_nextline, const char *right);
+const char *pem_errorstring(int e);
 
 int pem_next(unsigned char *b, unsigned char **bstart, size_t *blen, char **pem_header,
 			char **cipher, char **salt, unsigned char **bnext, int *status);
