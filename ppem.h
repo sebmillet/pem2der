@@ -28,10 +28,22 @@ enum {
 	PEM_BLANK_DATA
 };
 
+typedef struct pem_ctrl_t {
+	int remanent_index;
+	unsigned char *remanent_data_in;
+	int status;
+	char *header;
+	char *cipher;
+	char *salt;
+	unsigned char *b64_start;
+	size_t b64_len;
+//    unsigned char *data_next;
+} pem_ctrl_t;
+
 const char *pem_errorstring(int e);
 
-int pem_next(unsigned char *b, unsigned char **bstart, size_t *blen, char **pem_header,
-			char **cipher, char **salt, unsigned char **bnext, int *status);
+pem_ctrl_t *pem_construct_pem_ctrl_t(unsigned char *data_in);
+int pem_next(pem_ctrl_t *ctrl);
 
 int pem_base64_decode(const unsigned char *b64msg, size_t b64msg_len, unsigned char **binbuf, size_t *binbuf_len);
 int pem_base64_estimate_decoded_data_len(const unsigned char* b64msg, size_t b64msg_len);

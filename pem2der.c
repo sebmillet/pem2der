@@ -261,20 +261,6 @@ int manage_password(const unsigned char *salt, const char *cipher,
 	if (n >= 2 && (password[n - 1] == '\n' || password[n - 1] == '\r'))
 		password[n - 1] = '\0';
 
-/*    fprintf(stderr, "Cipher:      %s\n", opt_cipher);*/
-/*    fprintf(stderr, "Salt:        ");*/
-/*    if (bin_salt == NULL) {*/
-/*        fprintf(stderr, "(none)");*/
-/*    } else {*/
-/*        int ii;*/
-/*        for (ii = 0; ii < SALT_LEN; ++ii)*/
-/*            fprintf(stderr, "%02X", (unsigned char)bin_salt[ii]);*/
-/*    }*/
-/*    fprintf(stderr, "\n");*/
-/*    fprintf(stderr, "Password:    %s\n", password);*/
-
-	OpenSSL_add_all_algorithms();
-
 	if ((*evp_cipher = EVP_get_cipherbyname(cipher)) == NULL) {
 		errmsg = "Could not initialize cipher";
 		goto error;
@@ -289,18 +275,6 @@ int manage_password(const unsigned char *salt, const char *cipher,
 		errmsg = "Could not derive KEY and IV from password and salt";
 		goto error;
 	}
-
-/*    fprintf(stderr, "Key:         ");*/
-/*    int i;*/
-/*    for (i = 0; i < cipher->key_len; ++i) {*/
-/*        fprintf(stderr, "%02X", key[i]);*/
-/*    }*/
-/*    fprintf(stderr, "\n");*/
-/*    fprintf(stderr, "IV:          ");*/
-/*    for (i = 0; i < cipher->iv_len; ++i) {*/
-/*        fprintf(stderr, "%02X", iv[i]);*/
-/*    }*/
-/*    fprintf(stderr, "\n");*/
 
 	return 1;
 
@@ -323,42 +297,36 @@ error:
 
 void manage_pem(unsigned char *data_in, unsigned char **data_out, size_t *data_out_len)
 {
+	OpenSSL_add_all_algorithms();
+
 	*data_out = NULL;
 	*data_out_len = 0;
 
-	size_t blen;
-	char *pem_header;
-	char *str_cipher;
-	char *str_salt;
-	unsigned char *data_next;
-	int status;
-	int pem_index = 0;
-	while (pem_next(data_in, &data_in, &blen, &pem_header, &str_cipher, &str_salt, &data_next, &status)) {
+	pem_ctrl_t *ctrl = pem_construct_pem_ctrl_t(data_in);
+	while (pem_next(ctrl)) {
 
 		unsigned char *data_src = NULL;
 		size_t data_src_len = 0;
 
-		++pem_index;
-		if (status != PEM_ENCRYPTED_DATA && status != PEM_BLANK_DATA) {
-			fprintf(stderr, "[%s] (skipped: %s)\n", pem_header, pem_errorstring(status));
-			data_in = data_next;
+		if (ctrl->status != PEM_ENCRYPTED_DATA && ctrl->status != PEM_BLANK_DATA) {
+			fprintf(stderr, "[%s] (skipped: %s)\n", ctrl->header, pem_errorstring(ctrl->status));
 			continue;
 		}
 
-		data_in[blen] = '\0';
-		if (status == PEM_ENCRYPTED_DATA) {
-			fprintf(stderr, "[%s] (encrypted with %s", pem_header, str_cipher);
-			if (str_salt == NULL)
+		ctrl->b64_start[ctrl->b64_len] = '\0';
+		if (ctrl->status == PEM_ENCRYPTED_DATA) {
+			fprintf(stderr, "[%s] (encrypted with %s", ctrl->header, ctrl->cipher);
+			if (ctrl->salt == NULL)
 				fprintf(stderr, ", no salt)\n");
 			else
-				fprintf(stderr, ", salt: %s)\n", str_salt);
+				fprintf(stderr, ", salt: %s)\n", ctrl->salt);
 		} else {
-			fprintf(stderr, "[%s]\n", pem_header);
+			fprintf(stderr, "[%s]\n", ctrl->header);
 		}
 
-		size_t der_len = pem_base64_estimate_decoded_data_len(data_in, blen);
+		size_t der_len = pem_base64_estimate_decoded_data_len(ctrl->b64_start, ctrl->b64_len);
 		unsigned char *der = (unsigned char *)malloc(der_len);
-		if (!pem_base64_decode(data_in, blen, &der, &der_len)) {
+		if (!pem_base64_decode(ctrl->b64_start, ctrl->b64_len, &der, &der_len)) {
 			fprintf(stderr, "Error decoding BASE64\n");
 			goto post_encryption;
 		}
@@ -366,16 +334,16 @@ void manage_pem(unsigned char *data_in, unsigned char **data_out, size_t *data_o
 		data_src = der;
 		data_src_len = der_len;
 
-		if (status != PEM_ENCRYPTED_DATA)
+		if (ctrl->status != PEM_ENCRYPTED_DATA)
 			goto post_encryption;
 
 		data_src = NULL;
 
 		unsigned char *pem_salt = NULL;
 		size_t pem_salt_len;
-		pem_salt = read_hexa(str_salt, &pem_salt, &pem_salt_len);
-		if (str_salt != NULL && (pem_salt == NULL)) {
-			fprintf(stderr, "Incorrect salt: '%s'\n", str_salt);
+		pem_salt = read_hexa(ctrl->salt, &pem_salt, &pem_salt_len);
+		if (ctrl->salt != NULL && (pem_salt == NULL)) {
+			fprintf(stderr, "Incorrect salt: '%s'\n", ctrl->salt);
 			goto post_encryption;
 		}
 
@@ -383,7 +351,7 @@ void manage_pem(unsigned char *data_in, unsigned char **data_out, size_t *data_o
 		unsigned char *iv;
 		const EVP_CIPHER *cipher;
 
-		if (!manage_password(pem_salt, str_cipher, &key, &iv, &cipher))
+		if (!manage_password(pem_salt, ctrl->cipher, &key, &iv, &cipher))
 			goto post_encryption;
 
 		EVP_CIPHER_CTX *ctx;
@@ -435,11 +403,9 @@ post_encryption:
 			memcpy(target, data_src, data_src_len);
 			*data_out_len += data_src_len;
 		}
-
-		data_in = data_next;
 	}
-	if (pem_index == 0) {
-		if (status == PEM_NO_PEM_INFORMATION) {
+	if (ctrl->remanent_index == 0) {
+		if (ctrl->status == PEM_NO_PEM_INFORMATION) {
 			fprintf(stderr, "No PEM information in file %s\n", file_in);
 		} else {
 			fprintf(stderr, "Unable to parse PEM information in file %s\n", file_in);

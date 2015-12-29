@@ -107,17 +107,29 @@ const char *pem_errorstring(int e)
 		return errorstrings[e];
 }
 
-int pem_next(unsigned char *b, unsigned char **bstart, size_t *blen, char **pem_header,
-			char **cipher, char **salt, unsigned char **bnext, int *status)
+pem_ctrl_t *pem_construct_pem_ctrl_t(unsigned char *data_in)
+{
+	pem_ctrl_t *ctrl = malloc(sizeof(pem_ctrl_t));
+	ctrl->remanent_index = 0;
+	ctrl->remanent_data_in = data_in;
+	return ctrl;
+}
+
+int pem_next(pem_ctrl_t *ctrl)
 {
 
 	DBG("pem_next(): start")
 
-	*pem_header = NULL;
-	*bstart = NULL;
-	*blen = 0;
-	*cipher = NULL;
-	*salt = NULL;
+	DBG("Index = %d", ctrl->remanent_index);
+
+	unsigned char *b = ctrl->remanent_data_in;
+
+	ctrl->status = -1;
+	ctrl->header = NULL;
+	ctrl->cipher = NULL;
+	ctrl->salt = NULL;
+	ctrl->b64_start = NULL;
+	ctrl->b64_len = 0;
 
 	unsigned char *cipher_set0 = NULL;
 	unsigned char *salt_set0 = NULL;
@@ -129,21 +141,21 @@ int pem_next(unsigned char *b, unsigned char **bstart, size_t *blen, char **pem_
 		b = nextline;
 		if (header != NULL && fin != NULL && header < fin) {
 			*fin = '\0';
-			*pem_header = (char *)header;
+			ctrl->header = (char *)header;
 
-			DBG("Found header opening '%s'", *pem_header)
+			DBG("Found header opening '%s'", ctrl->header)
 
 			break;
 		}
 	} while (nextline != NULL);
 
 	if (nextline == NULL) {
-		if (*pem_header == NULL) {
+		if (ctrl->header == NULL) {
 			DBG("Status set to PEM_NO_PEM_INFORMATION")
-			*status = PEM_NO_PEM_INFORMATION;
+			ctrl->status = PEM_NO_PEM_INFORMATION;
 		} else {
 			DBG("Status set to PEM_PARSE_ERROR")
-			*status = PEM_PARSE_ERROR;
+			ctrl->status = PEM_PARSE_ERROR;
 		}
 		DBG("pem_next(): returning 0")
 		return 0;
@@ -182,7 +194,7 @@ int pem_next(unsigned char *b, unsigned char **bstart, size_t *blen, char **pem_
 
 						while (isblank(*h2))
 							++h2;
-						*cipher = (char *)h2;
+						ctrl->cipher = (char *)h2;
 						while (*h2 != '\0' && *h2 != ',' && !isblank(*h2) && *h2 != '\r' && *h2 != '\n')
 							++h2;
 						cipher_set0 = h2;
@@ -192,11 +204,11 @@ int pem_next(unsigned char *b, unsigned char **bstart, size_t *blen, char **pem_
 							++h2;
 							while (isblank(*h2))
 								++h2;
-							*salt = (char *)h2;
+							ctrl->salt = (char *)h2;
 							while (*h2 != '\0' && *h2 != '\r' && *h2 != '\n')
 								++h2;
 							--h2;
-							while (isblank(*h2) && (char *)h2 >= *salt)
+							while (isblank(*h2) && (char *)h2 >= ctrl->salt)
 								--h2;
 							salt_set0 = h2 + 1;
 
@@ -212,7 +224,7 @@ int pem_next(unsigned char *b, unsigned char **bstart, size_t *blen, char **pem_
 /*    DBG("A- b: [%c] %d, [%c] %d, [%c] %d, [%c] %d, [%c] %d", b[0], b[0], b[1], b[1], b[2], b[2], b[3], b[3], b[4], b[4])*/
 
 	int got_empty_line_after_dek_info = 0;
-	if (has_proc_type && *cipher != NULL) {
+	if (has_proc_type && ctrl->cipher != NULL) {
 		strrightis(b, &nextline, "");
 		if (nextline != NULL) {
 			b = nextline;
@@ -230,20 +242,20 @@ int pem_next(unsigned char *b, unsigned char **bstart, size_t *blen, char **pem_
 		}
 	}
 
-	if (*cipher != NULL) {
+	if (ctrl->cipher != NULL) {
 		*cipher_set0 = '\0';
-		if (!strlen(*cipher))
-			*cipher = NULL;
-		if (*salt != NULL) {
+		if (!strlen(ctrl->cipher))
+			ctrl->cipher = NULL;
+		if (ctrl->salt != NULL) {
 			*salt_set0 = '\0';
-			if (!strlen(*salt))
-				*salt = NULL;
+			if (!strlen(ctrl->salt))
+				ctrl->salt = NULL;
 		}
 	}
 
 	while (*b == '\n' || (*b == '\r' && b[1] == '\n'))
 		b += (*b == '\n' ? 1 : 2);
-	*bstart = b;
+	ctrl->b64_start = b;
 
 	int got_closed = 0;
 	do {
@@ -257,54 +269,59 @@ int pem_next(unsigned char *b, unsigned char **bstart, size_t *blen, char **pem_
 		}
 		b = nextline;
 	} while (nextline != NULL);
-	*bnext = nextline;
+	ctrl->remanent_data_in = nextline;
 
 	int retval = got_closed;
 
 	if (got_closed) {
+		ctrl->remanent_index++;
+		DBG("Increasing index. New value = %d", ctrl->remanent_index);
+
 			/*
 			 * Not a typo.
 			 * Normally blen is 'arrival - beginning + 1' but here,
 			 * arrival is 'b - 1' so -1 + 1 => no '+ 1' term.
 			 * */
-		*blen = b - *bstart;
-		if (has_proc_type && *cipher == NULL) {
+		ctrl->b64_len = b - ctrl->b64_start;
+		if (has_proc_type && ctrl->cipher == NULL) {
 
 			if (proc_type_is_set_for_encryption) {
 				DBG("Status set to PEM_MISSING_ENCRYPTION_INFORMATION")
-				*status = PEM_MISSING_ENCRYPTION_INFORMATION;
+				ctrl->status = PEM_MISSING_ENCRYPTION_INFORMATION;
 			} else {
 				DBG("Status set to PEM_UNMANAGED_PROC_TYPE")
-				*status = PEM_UNMANAGED_PROC_TYPE;
+				ctrl->status = PEM_UNMANAGED_PROC_TYPE;
 			}
-		} else if (*cipher == NULL) {
-			if (*blen == 0) {
+		} else if (ctrl->cipher == NULL) {
+			if (ctrl->b64_len == 0) {
 				DBG("Status set to PEM_EMPTY_DATA")
-				*status = PEM_EMPTY_DATA;
+				ctrl->status = PEM_EMPTY_DATA;
 			} else {
 				DBG("Status set to PEM_BLANK_DATA")
-				*status = PEM_BLANK_DATA;
+				ctrl->status = PEM_BLANK_DATA;
 			}
 		} else {
-			if (*blen == 0) {
+			if (ctrl->b64_len == 0) {
 				DBG("Status set to PEM_EMPTY_DATA")
-				*status = PEM_EMPTY_DATA;
+				ctrl->status = PEM_EMPTY_DATA;
 			} else if (got_empty_line_after_dek_info) {
 				DBG("Status set to PEM_ENCRYPTED_DATA")
-				*status = PEM_ENCRYPTED_DATA;
+				ctrl->status = PEM_ENCRYPTED_DATA;
 			} else {
 				DBG("Status set to PEM_MISSING_EMPTY_LINE_AFTER_ENCRYPTION_INFO")
-				*status = PEM_MISSING_EMPTY_LINE_AFTER_ENCRYPTION_INFO;
+				ctrl->status = PEM_MISSING_EMPTY_LINE_AFTER_ENCRYPTION_INFO;
 			}
 		}
 	} else {
 		DBG("Status set to PEM_PARSE_ERROR")
-		*status = PEM_PARSE_ERROR;
+		ctrl->status = PEM_PARSE_ERROR;
 	}
 
-	DBG("*bstart = %lu, *blen = %lu, *bnext = %lu", (long unsigned int)*bstart, (long unsigned int)*blen, (long unsigned int)*bnext)
+	DBG("ctrl->b64_start = %lu, ctrl->b64_len = %lu, ctrl->remanent_data_in = %lu",
+			(long unsigned int)ctrl->b64_start, (long unsigned int)ctrl->b64_len, (long unsigned int)ctrl->remanent_data_in)
 
 	DBG("pem_next(): returning %d", retval)
+
 	return retval;
 }
 
