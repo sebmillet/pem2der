@@ -1,2 +1,2 @@
-Unable to parse PEM information in file ece3.pem
+[EC PRIVATE KEY] (skipped: PEM parsing error)
 Output data length: 0
