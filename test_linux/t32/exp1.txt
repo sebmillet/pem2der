@@ -1,16 +1,13 @@
 [EC PRIVATE 1] (skipped: missing encryption information)
 [EC PRIVATE 2] (encrypted with DES-EDE3-CBC, no salt)
 decryption error
-[EC PRIVATE 3] (encrypted with DES-EDE3-CBC, salt: z z)
-Incorrect salt: 'z z'
-[EC PRIVATE 4] (encrypted with DES-EDE3-CBC, salt: z)
-Incorrect salt: 'z'
-[EC PRIVATE 5] (encrypted with DES-EDE3-CBC, salt: z)
-Incorrect salt: 'z'
+[EC PRIVATE 3] (skipped: incorrect salt)
+[EC PRIVATE 4] (skipped: incorrect salt)
+[EC PRIVATE 5] (skipped: incorrect salt)
 [EC PRIVATE 6] (encrypted with DES-EDE3-CBC, no salt)
 decryption error
-[EC PRIVATE 7] (encrypted with DES-EDE3-CBC, salt: ,)
-Incorrect salt: ','
+[EC PRIVATE 7] (skipped: incorrect salt)
+[] (skipped: no PEM information)
 [EC PRIVATE 9] (encrypted with DES-EDE3-CBC, no salt)
 decryption error
 [EC PRIVATE 10] (skipped: unmanaged PEM format)
@@ -18,7 +15,6 @@ decryption error
 [EC PRIVATE 12] (skipped: unmanaged PEM format)
 [EC PRIVATE 13] (skipped: unmanaged PEM format)
 [EC PRIVATE 14] (skipped: unmanaged PEM format)
-[EC PRIVATE 15] (encrypted with Bonjour_chez_vous, salt: alors_quoi_de_neuf)
-Incorrect salt: 'alors_quoi_de_neuf'
+[EC PRIVATE 15] (skipped: incorrect salt)
 [EC PRIVATE 16] (skipped: non standard encryption information)
 Output data length: 0

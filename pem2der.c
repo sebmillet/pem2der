@@ -3,7 +3,7 @@
  *
  *       Filename:  pem2der.c
  *
- *    Description:  Crypto : convert PEM to DER format
+ *    Description:  Crypto: convert PEM to DER format
  *
  *        Version:  1.0
  *        Created:  27/12/2015 10:38:44
@@ -17,10 +17,6 @@
 
 /*#define DEBUG*/
 
-#include <openssl/conf.h>
-#include <openssl/evp.h>
-#include <openssl/err.h>
-
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
@@ -30,8 +26,7 @@
 
 #define PACKAGE_NAME "pem2der"
 
-#define FALSE 0
-#define TRUE  1
+#define UNUSED(x) (void)(x)
 
 #ifdef DEBUG
 #define DBG(...) \
@@ -48,6 +43,8 @@ char *file_in = NULL;
 char *file_out = NULL;
 
 char *opt_password = NULL;
+
+int opt_walker = 0;
 
 void usage()
 {
@@ -87,20 +84,9 @@ char *s_alloc_and_copy(char **dst, const char *src)
 	unsigned int s = strlen(src) + 1;
 	char *target = (char *)malloc(s);
 	s_strncpy(target, src, s);
-	if (dst != NULL)
+	if (dst)
 		*dst = target;
 	return target;
-}
-
-void error_stop(const char *fmt, ...)
-{
-	va_list args;
-	va_start(args, fmt);
-	fprintf(stderr, "Error: ");
-	vfprintf(stderr, fmt, args);
-	fprintf(stderr, "\n");
-	va_end(args);
-	exit(-1);
 }
 
 ssize_t file_size(const char* filename)
@@ -112,7 +98,7 @@ ssize_t file_size(const char* filename)
 
 static void opt_check(unsigned int n, const char *opt)
 {
-	static int defined_options[2] = {0, 0};
+	static int defined_options[3] = {0, 0, 0};
 
 	assert(n < sizeof(defined_options) / sizeof(*defined_options));
 
@@ -120,7 +106,7 @@ static void opt_check(unsigned int n, const char *opt)
 		fprintf(stderr, "Option %s already set\n", opt);
 		exit(-2);
 	} else
-		defined_options[n] = TRUE;
+		defined_options[n] = 1;
 }
 
 static void parse_options(int argc, char **argv)
@@ -170,8 +156,11 @@ if (++a >= argc) { \
 			opt_check(0, argv[a]);
 			OPT_WITH_VALUE_CHECK
 			file_out = argv[a];
-		} else if (!strcmp(argv[a], "--password")) {
+		} else if (!strcmp(argv[a], "--walker") || !strcmp(argv_a_short, "-w")) {
 			opt_check(1, argv[a]);
+			opt_walker = 1;
+		} else if (!strcmp(argv[a], "--password")) {
+			opt_check(2, argv[a]);
 			OPT_WITH_VALUE_CHECK
 			opt_password = argv[a];
 		} else if (argv[a][0] == '-') {
@@ -184,7 +173,7 @@ if (++a >= argc) { \
 				break;
 			}
 		} else {
-			if (file_in == NULL) {
+			if (!file_in) {
 				file_in = argv[a];
 			} else {
 				fprintf(stderr, "%s: invalid argument -- '%s'\n", PACKAGE_NAME, argv[a]);
@@ -199,97 +188,33 @@ if (++a >= argc) { \
 		if (shortopt_nb == 0)
 			++a;
 	}
-	if ((a >= 1 && a < argc - 1) || (a >= 1 && a == argc - 1 && file_in != NULL)) {
+	if ((a >= 1 && a < argc - 1) || (a >= 1 && a == argc - 1 && file_in)) {
 		fprintf(stderr, "%s: trailing options.\n", PACKAGE_NAME);
 		a = -1;
 	} else if (a >= 1 && a == argc - 1) {
 		file_in = argv[a];
-	} else if (missing_option_value != NULL) {
+	} else if (missing_option_value) {
 		fprintf(stderr, "%s: option '%s' requires one argument\n", PACKAGE_NAME, missing_option_value);
 	}
 	if (a < 0)
 		usage();
-	if (file_in == NULL) {
+	if (!file_in) {
 		fprintf(stderr, "%s: you must specify the input file\n", PACKAGE_NAME);
 		usage();
 	}
 }
 
-int hexchar_to_int(const char c)
-{
-	if (c >= '0' && c <= '9')
-		return c - '0';
-	else if (c >= 'A' && c <= 'F')
-		return (c - 'A') + 10;
-	else if (c >= 'a' && c <= 'f')
-		return (c - 'a') + 10;
-	else
-		return -1;
-}
-
-	/*
-	 * Read a hex string (like "A0F23BB1") and convert into
-	 * a binary block corresponding to the hex string.
-	 * Hex characters can be lower or upper case letters.
-	 *
-	 * The target binary block is allocated and the caller will
-	 * later have to manage freeing it.
-	 *
-	 * If there is an issue in the conversion (illegal characters),
-	 * no allocation is done and *buf and *buf_len are zeroed.
-	 *
-	 * Return 1 if success (meaning, the binary block got allocated
-	 * and contains the binary corresponding to hex string), return 0
-	 * otherwise.
-	 *
-	 * *WARNING*
-	 *   The returned block is *NOT* a string (it is not null-character
-	 *   terminated).
-	 *
-	 */
-int alloc_and_read_hexa(const char *s, unsigned char **buf, size_t *buf_len)
-{
-	*buf = NULL;
-	*buf_len = 0;
-
-	if (s == NULL)
-		return 0;
-
-	int n = strlen(s);
-	if (n <= 1 || n % 2 != 0)
-		return 0;
-
-	*buf_len = n / 2;
-	*buf = malloc(*buf_len);
-	int i;
-	int j = 0;
-	for (i = 0; i < n; i += 2) {
-		int code_hi = hexchar_to_int(s[i]);
-		int code_lo = hexchar_to_int(s[i + 1]);
-		if (code_hi < 0 || code_lo < 0) {
-			free(*buf);
-			*buf = NULL;
-			*buf_len = 0;
-			return 0;
-		}
-		(*buf)[j] = (unsigned char)((code_hi << 4) + code_lo);
-		++j;
-	}
-	assert(j == (int)*buf_len);
-	return 1;
-}
-
-char *get_password()
+char *cb_password_pre()
 {
 	char *password;
 
 	char *readpwd;
-	if (opt_password == NULL) {
+	if (!opt_password) {
 		fprintf(stderr, "Please type in the password:\n");
 		readpwd = NULL;
 		size_t s = 0;
 		if (getline(&readpwd, &s, stdin) < 0) {
-			if (readpwd != NULL)
+			if (readpwd)
 				free(readpwd);
 			return NULL;
 		}
@@ -310,174 +235,95 @@ char *get_password()
 	return password;
 }
 
-int do_decrypt(const char *cipher, const unsigned char *salt, const unsigned char *in, int in_len,
-		unsigned char **out, int *out_len, const char **errmsg)
+void cb_password_post(char *password)
 {
-	*out = NULL;
-	*out_len = 0;
-	*errmsg = NULL;
-
-	const EVP_CIPHER *evp_cipher;
-	if ((evp_cipher = EVP_get_cipherbyname(cipher)) == NULL) {
-		*errmsg = "unable to acquire cipher by its name";
-		DBG("do_decrypt(): set *errmsg to '%s' and returning 0 (FAILURE)", *errmsg)
-		return 0;
-	}
-
-	char *password;
-	if ((password = get_password()) == NULL) {
-		*errmsg = "no password";
-		DBG("do_decrypt(): set *errmsg to '%s' and returning 0 (FAILURE)", *errmsg)
-		return 0;
-	}
-
-	EVP_CIPHER_CTX *ctx;
-	if (!(ctx = EVP_CIPHER_CTX_new())) {
-		*errmsg = "unable to initialize cipher context";
-		DBG("do_decrypt(): set *errmsg to '%s' and returning 0 (FAILURE)", *errmsg)
+	if (password)
 		free(password);
-		return 0;
+}
+
+void cb_loop_top(const pem_ctrl_t *ctrl)
+{
+	void print_hexa(FILE *o, const unsigned char *buf, int buf_len) {
+		int i; for (i = 0; i < buf_len; ++i) fprintf(o, "%02X", (unsigned char)buf[i]);
 	}
 
-	unsigned char *key = malloc(evp_cipher->key_len);
-	unsigned char *iv = malloc(evp_cipher->iv_len);
-
-	do {
-
-		int nb_bytes;
-		if ((nb_bytes = EVP_BytesToKey(evp_cipher, EVP_md5(), salt, (unsigned char *)password, strlen(password), 1, key, iv)) < 1) {
-			*errmsg = "could not derive KEY and IV from password and salt";
-			break;
-		}
-
-		if (EVP_DecryptInit_ex(ctx, evp_cipher, NULL, key, (unsigned char *)salt) != 1) {
-			*errmsg = "unable to initialize decryption";
-			break;
-		}
-
-		int outl;
-		*out = malloc(in_len + 256);
-		if (EVP_DecryptUpdate(ctx, *out, &outl, in, in_len) != 1) {
-			*errmsg = "unable to perform decryption";
-			break;
-		}
-		int final_outl;
-		if (EVP_DecryptFinal_ex(ctx, *out + outl, &final_outl) != 1) {
-			*errmsg = "decryption error";
-			break;
-		}
-		*out_len = outl + final_outl;
-
-	} while (FALSE);
-
-	free(iv);
-	free(key);
-	free(password);
-	EVP_CIPHER_CTX_free(ctx);
-
-	if (*errmsg != NULL) {
-		if (*out != NULL) {
-			free(*out);
-			*out = NULL;
-			*out_len = 0;
-		}
-		DBG("do_decrypt(): set *errmsg to '%s' and returning 0 (FAILURE)", *errmsg)
-		return 0;
+	if (!pem_has_data(ctrl)) {
+		DBG("pem_walker(): [%s] (skipped: %s)", pem_header(ctrl), pem_errorstring(pem_status(ctrl)))
+		fprintf(stderr, "[%s] (skipped: %s)\n", pem_header(ctrl), pem_errorstring(pem_status(ctrl)));
+		return;
 	}
 
-	DBG("do_decrypt(): returning 1 (SUCCESS)")
-	return 1;
+	if (pem_has_encrypted_data(ctrl)) {
+		DBG("pem_walker(): [%s] (encrypted: '%s')", pem_header(ctrl), pem_cipher(ctrl))
+		fprintf(stderr, "[%s] (encrypted with %s", pem_header(ctrl), pem_cipher(ctrl));
+		if (!pem_salt(ctrl))
+			fprintf(stderr, ", no salt)\n");
+		else {
+			fprintf(stderr, ", salt: ");
+			print_hexa(stderr, pem_salt(ctrl), pem_salt_len(ctrl));
+			fprintf(stderr, ")\n");
+		}
+	} else {
+		fprintf(stderr, "[%s]\n", pem_header(ctrl));
+	}
 }
 
-void openssl_start()
+void cb_loop_decrypt(int decrypt_ok, const char *errmsg)
 {
-	OpenSSL_add_all_algorithms();
+	if (!decrypt_ok)
+		fprintf(stderr, "%s\n", errmsg);
 }
 
-	/*
-	 * the list of functions to call was found here:
-	 *   https://wiki.openssl.org/index.php/Library_Initialization
-	 *
-	 * */
-void openssl_terminate()
+void cb_loop_bottom(const unsigned char *data_src, size_t data_src_len)
 {
-	FIPS_mode_set(0);
-	CONF_modules_unload(1);
-	EVP_cleanup();
-	CRYPTO_cleanup_all_ex_data();
-	ERR_remove_state(0);
-	ERR_free_strings();
+UNUSED(data_src);
+UNUSED(data_src_len);
 }
 
-void pem_walker(const unsigned char *data_in, unsigned char **data_out, size_t *data_out_len)
+void use_my_own_pem_walker(const unsigned char *data_in, unsigned char **data_out, size_t *data_out_len)
 {
-	openssl_start();
+	DBG("use_my_own_pem_walker() start")
 
 	*data_out = NULL;
 	*data_out_len = 0;
 
-	pem_ctrl_t *ctrl = pem_construct_pem_ctrl(data_in);
-	while (pem_next(ctrl)) {
-		if (!pem_has_data(ctrl)) {
-			DBG("pem_walker(): [%s] (skipped: %s)", pem_header(ctrl), pem_errorstring(pem_status(ctrl)))
-			fprintf(stderr, "[%s] (skipped: %s)\n", pem_header(ctrl), pem_errorstring(pem_status(ctrl)));
-			continue;
-		}
+	pem_openssl_start();
 
-		if (pem_has_encrypted_data(ctrl)) {
-			DBG("pem_walker(): [%s] (encrypted: '%s', salt: '%s')",
-					pem_header(ctrl), pem_cipher(ctrl), pem_salt(ctrl) == NULL ? "(none)" : pem_salt(ctrl))
-			fprintf(stderr, "[%s] (encrypted with %s", pem_header(ctrl), pem_cipher(ctrl));
-			if (pem_salt(ctrl) == NULL)
-				fprintf(stderr, ", no salt)\n");
-			else
-				fprintf(stderr, ", salt: %s)\n", pem_salt(ctrl));
-		} else {
-			fprintf(stderr, "[%s]\n", pem_header(ctrl));
-		}
+	pem_ctrl_t *ctrl = pem_construct_pem_ctrl(data_in);
+	pem_regcb_password(ctrl, cb_password_pre, cb_password_post);
+	while (pem_next(ctrl)) {
+		cb_loop_top(ctrl);
+		if (!pem_has_data(ctrl))
+			continue;
 
 		unsigned char *data_src;
 		size_t data_src_len;
 		int data_src_is_readonly;
 		if (!pem_has_encrypted_data(ctrl)) {
-			DBG("pem_walker(): data is clear")
 			data_src = (unsigned char *)pem_bin(ctrl);
 			data_src_len = pem_bin_len(ctrl);
-			data_src_is_readonly = TRUE;
+			data_src_is_readonly = 1;
 		} else {
-			DBG("pem_walker(): data is encrypted")
 			data_src = NULL;
 			data_src_len = 0;
 
-			unsigned char *salt = NULL;
-			size_t salt_len;
-			alloc_and_read_hexa(pem_salt(ctrl), &salt, &salt_len);
-			if (pem_salt(ctrl) != NULL && (salt == NULL)) {
-				DBG("pem_walker(): incorrect salt")
-				DBG("pem_walker(): salt: '%s'", pem_salt(ctrl))
-				fprintf(stderr, "Incorrect salt: '%s'\n", pem_salt(ctrl));
+			unsigned char *out;
+			int out_len;
+			const char *errmsg;
+			if (pem_decrypt(ctrl, &out, &out_len, &errmsg) == 1) {
+				data_src = out;
+				data_src_len = out_len;
+				data_src_is_readonly = 0;
+				cb_loop_decrypt(1, NULL);
 			} else {
-				unsigned char *out;
-				int out_len;
-				const char *errmsg;
-				if (do_decrypt(pem_cipher(ctrl), salt, pem_bin(ctrl), pem_bin_len(ctrl), &out, &out_len, &errmsg) == 1) {
-					DBG("pem_walker(): decrypt successful")
-					data_src = out;
-					data_src_len = out_len;
-					data_src_is_readonly = FALSE;
-				} else {
-					DBG("pem_walker(): decrypt error: %s", errmsg)
-					fprintf(stderr, "%s\n", errmsg);
-				}
+				DBG("pem_walker(): decrypt error: %s", errmsg)
+				cb_loop_decrypt(0, errmsg);
 			}
-			if (salt != NULL)
-				free(salt);
 		}
-
-		if (data_src != NULL) {
-			DBG("data (was clear or got decrypted) to add to buffer")
+		cb_loop_bottom(data_src, data_src_len);
+		if (data_src) {
 			unsigned char *target;
-			if (*data_out == NULL) {
+			if (!*data_out) {
 				*data_out = malloc(data_src_len);
 				target = *data_out;
 				*data_out_len = 0;
@@ -492,8 +338,27 @@ void pem_walker(const unsigned char *data_in, unsigned char **data_out, size_t *
 		}
 	}
 	pem_destruct_pem_ctrl(ctrl);
+	pem_openssl_terminate();
 
-	openssl_terminate();
+	DBG("use_my_own_pem_walker() end")
+}
+
+void use_pem_walker_provided_by_ppem(const unsigned char *data_in, unsigned char **data_out, size_t *data_out_len)
+{
+	DBG("use_pem_walker_provided_by_ppem() start")
+
+	pem_ctrl_t *ctrl = pem_construct_pem_ctrl(data_in);
+
+	pem_regcb_password(ctrl, cb_password_pre, cb_password_post);
+	pem_regcb_loop_top(ctrl, cb_loop_top);
+	pem_regcb_loop_decrypt(ctrl, cb_loop_decrypt);
+	pem_regcb_loop_bottom(ctrl, cb_loop_bottom);
+
+	pem_walker(ctrl, data_out, data_out_len);
+
+	pem_destruct_pem_ctrl(ctrl);
+
+	DBG("use_pem_walker_provided_by_ppem() end")
 }
 
 int main(int argc, char **argv)
@@ -512,7 +377,7 @@ int main(int argc, char **argv)
 
 		bufin = malloc(bufin_len + 1);
 		FILE *fin;
-		if ((fin = fopen(file_in, "rb")) == NULL) {
+		if (!(fin = fopen(file_in, "rb"))) {
 			fprintf(stderr, "Unable to open file %s for input", file_in);
 			break;
 		}
@@ -527,24 +392,27 @@ int main(int argc, char **argv)
 
 		size_t bufout_len = 0;
 
-		pem_walker(bufin, &bufout, &bufout_len);
+		if (opt_walker)
+			use_my_own_pem_walker(bufin, &bufout, &bufout_len);
+		else
+			use_pem_walker_provided_by_ppem(bufin, &bufout, &bufout_len);
 
 		fprintf(stderr, "Output data length: %lu\n", bufout_len);
 
 		FILE *fout;
-		if (file_out == NULL)
+		if (!file_out)
 			fout = stdout;
-		else if ((fout = fopen(file_out, "wb")) == NULL) {
+		else if (!(fout = fopen(file_out, "wb"))) {
 			fprintf(stderr, "Unable to open file %s for output", file_out);
 			break;
 		}
 		if (fwrite(bufout, 1, bufout_len, fout) != bufout_len) {
-			error_stop("Could not write all data to file %s", file_out == NULL ? "(stdout)" : file_out);
+			fprintf(stderr, "Could not write all data to file %s", !file_out ? "(stdout)" : file_out);
 			break;
 		}
-		if (file_out != NULL)
+		if (file_out)
 			fclose(fout);
-	} while (FALSE);
+	} while (0);
 
 	free(bufout);
 	free(bufin);

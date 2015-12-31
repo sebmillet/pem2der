@@ -19,10 +19,17 @@
 
 #include "ppem.h"
 
+#include <assert.h>
+
 #include <ctype.h>
 #include <string.h>
+
 #include <openssl/bio.h>
 #include <openssl/evp.h>
+#include <openssl/conf.h>
+#include <openssl/err.h>
+
+#define SALT_MINIMUM_BYTES 8
 
 static void reset_round(pem_ctrl_t *ctrl);
 static int pem_base64_estimate_decoded_data_len(const unsigned char* b64msg, size_t b64msg_len);
@@ -41,24 +48,13 @@ static int pem_base64_decode(const unsigned char *b64msg, size_t b64msg_len, uns
 #define DBG(...)
 #endif
 
-	/*
-	 * Needed by FATAL_ERROR macro
-	 * */
-
-#define FATAL_ERROR(...) \
-{ \
-	fprintf(stderr, "File %s line %d: ", __FILE__, __LINE__); \
-	fprintf(stderr, __VA_ARGS__); \
-	fprintf(stderr, "\n"); \
-	exit(1); \
-}
-
 static const char *errorstrings[] = {
 	"no PEM information",                  /* PEM_NO_PEM_INFORMATION */
 	"PEM parsing error",                   /* PEM_PARSE_ERROR */
 	"unmanaged PEM format",                /* PEM_UNMANAGED_PROC_TYPE */
 	"missing encryption information"    ,  /* PEM_MISSING_ENCRYPTION_INFORMATION */
 	"non standard encryption information", /* PEM_MISSING_EMPTY_LINE_AFTER_ENCRYPTION_INFO */
+	"incorrect salt",                      /* PEM_INCORRECT_SALT */
 	"empty data",                          /* PEM_EMPTY_DATA */
 	"bad base64 content",                  /* PEM_BAD_BASE64_CONTENT */
 	"encrypted data",                      /* PEM_ENCRYPTED_DATA */
@@ -66,13 +62,22 @@ static const char *errorstrings[] = {
 };
 
 struct pem_ctrl_t {
-	int remanent_index;
-	const unsigned char *remanent_data_current;
+		/* Fields remanent across calls to pem_next() */
+	int index;
+	const unsigned char *data_current;
+	char *(*cb_password_pre)();
+	void (*cb_password_post)(char *password);
+	void (*cb_loop_top)(const pem_ctrl_t *ctrl);
+	void (*cb_loop_decrypt)(int decrypt_ok, const char *errmsg);
+	void (*cb_loop_bottom)(const unsigned char *data_src, size_t data_src_len);
+
+		/* Fields reset at each call of pem_next() */
 	int status;
-	char *alloc_header;
-	char *alloc_cipher;
-	char *alloc_salt;
-	unsigned char *alloc_bin;
+	char *header;
+	char *cipher;
+	unsigned char *salt;
+	size_t salt_len;
+	unsigned char *bin;
 	size_t bin_len;
 };
 
@@ -126,16 +131,40 @@ const char *pem_errorstring(int e)
 pem_ctrl_t *pem_construct_pem_ctrl(const unsigned char *data_in)
 {
 	pem_ctrl_t *ctrl = malloc(sizeof(pem_ctrl_t));
-	ctrl->remanent_index = 0;
-	ctrl->remanent_data_current = data_in;
+	ctrl->index = 0;
+	ctrl->data_current = data_in;
 
-	ctrl->alloc_header = NULL;
-	ctrl->alloc_cipher = NULL;
-	ctrl->alloc_salt = NULL;
-	ctrl->alloc_bin = NULL;
+	ctrl->header = NULL;
+	ctrl->cipher = NULL;
+	ctrl->salt = NULL;
+	ctrl->bin = NULL;
+
+	ctrl->cb_password_pre = NULL;
+	ctrl->cb_password_post = NULL;
 
 	DBG("pem_construct_pem_ctrl(): constructed one pem_ctrl_t*: %lu", (long unsigned int)ctrl)
 	return ctrl;
+}
+
+void pem_regcb_password(pem_ctrl_t *ctrl, char *(*cb_password_pre)(), void (*cb_password_post)(char *password))
+{
+	ctrl->cb_password_pre = cb_password_pre;
+	ctrl->cb_password_post = cb_password_post;
+}
+
+void pem_regcb_loop_top(pem_ctrl_t *ctrl, void (*cb_loop_top)(const pem_ctrl_t *ctrl))
+{
+	ctrl->cb_loop_top = cb_loop_top;
+}
+
+void pem_regcb_loop_decrypt(pem_ctrl_t *ctrl, void (*cb_loop_decrypt)(int decrypt_ok, const char *errmsg))
+{
+	ctrl->cb_loop_decrypt = cb_loop_decrypt;
+}
+
+void pem_regcb_loop_bottom(pem_ctrl_t *ctrl, void (*cb_loop_bottom)(const unsigned char *data_src, size_t data_src_len))
+{
+	ctrl->cb_loop_bottom = cb_loop_bottom;
 }
 
 void pem_destruct_pem_ctrl(pem_ctrl_t *ctrl)
@@ -147,21 +176,21 @@ void pem_destruct_pem_ctrl(pem_ctrl_t *ctrl)
 
 static void reset_round(pem_ctrl_t *ctrl)
 {
-	if (ctrl->alloc_header != NULL) {
-		free(ctrl->alloc_header);
-		ctrl->alloc_header = NULL;
+	if (ctrl->header) {
+		free(ctrl->header);
+		ctrl->header = NULL;
 	}
-	if (ctrl->alloc_cipher != NULL) {
-		free(ctrl->alloc_cipher);
-		ctrl->alloc_cipher = NULL;
+	if (ctrl->cipher) {
+		free(ctrl->cipher);
+		ctrl->cipher = NULL;
 	}
-	if (ctrl->alloc_salt != NULL) {
-		free(ctrl->alloc_salt);
-		ctrl->alloc_salt = NULL;
+	if (ctrl->salt) {
+		free(ctrl->salt);
+		ctrl->salt = NULL;
 	}
-	if (ctrl->alloc_bin != NULL) {
-		free(ctrl->alloc_bin);
-		ctrl->alloc_bin = NULL;
+	if (ctrl->bin) {
+		free(ctrl->bin);
+		ctrl->bin = NULL;
 	}
 	ctrl->bin_len = 0;
 
@@ -169,10 +198,11 @@ static void reset_round(pem_ctrl_t *ctrl)
 }
 
 int pem_status(const pem_ctrl_t *ctrl)                { return ctrl->status; }
-const char *pem_header(const pem_ctrl_t *ctrl)        { return ctrl->alloc_header; }
-const char *pem_cipher(const pem_ctrl_t *ctrl)        { return ctrl->alloc_cipher; }
-const char *pem_salt(const pem_ctrl_t *ctrl)          { return ctrl->alloc_salt; }
-const unsigned char *pem_bin(const pem_ctrl_t *ctrl)  { return ctrl->alloc_bin; }
+const char *pem_header(const pem_ctrl_t *ctrl)        { return ctrl->header; }
+const char *pem_cipher(const pem_ctrl_t *ctrl)        { return ctrl->cipher; }
+const unsigned char *pem_salt(const pem_ctrl_t *ctrl) { return ctrl->salt; }
+size_t pem_salt_len(const pem_ctrl_t *ctrl)           { return ctrl->salt_len; }
+const unsigned char *pem_bin(const pem_ctrl_t *ctrl)  { return ctrl->bin; }
 size_t pem_bin_len(const pem_ctrl_t *ctrl)            { return ctrl->bin_len; }
 
 	/*
@@ -192,10 +222,9 @@ size_t pem_bin_len(const pem_ctrl_t *ctrl)            { return ctrl->bin_len; }
 	 * if end is not >= begin, then consider source being an empty string.
 	 *
 	 * */
-static char *s_alloc_and_copy(const unsigned char *begin, const unsigned char *end)
+static char *special_str_copy(const unsigned char *begin, const unsigned char *end)
 {
-	if (begin == NULL || end == NULL)
-		FATAL_ERROR("begin or end is NULL!");
+	assert(begin && end);
 
 	ssize_t len;
 	if (begin <= end)
@@ -207,8 +236,7 @@ static char *s_alloc_and_copy(const unsigned char *begin, const unsigned char *e
 	while (begin < end) {
 		*(s++) = *(begin++);
 	}
-	if (s - s0 != len)
-		FATAL_ERROR("Man, what is going on here?");
+	assert(s - s0 == len);
 	*s = '\0';
 
 	return (char *)s0;
@@ -217,11 +245,11 @@ static char *s_alloc_and_copy(const unsigned char *begin, const unsigned char *e
 int pem_next(pem_ctrl_t *ctrl)
 {
 	DBG("pem_next(): start")
-	DBG("Index = %d", ctrl->remanent_index)
+	DBG("Index = %d", ctrl->index)
 
 	reset_round(ctrl);
 
-	if (ctrl->remanent_data_current == NULL) {
+	if (!ctrl->data_current) {
 		ctrl->status = PEM_TERMINATED;
 		DBG("Status set to PEM_TERMINATED")
 		DBG("pem_next(): returning 0")
@@ -239,32 +267,49 @@ int pem_next(pem_ctrl_t *ctrl)
 
 
 	DBG("pem_next() part 1: parse PEM tags to find inner BASE64-encoded content")
-	const unsigned char *b = ctrl->remanent_data_current;
+	const unsigned char *b = ctrl->data_current;
+	const unsigned char *b0 = b;
+	const unsigned char *old_b;
 	const unsigned char *nextline;
 	do {
 		const unsigned char *header = str_leftis(b, "-----begin ");
 		const unsigned char *fin = str_rightis(b, &nextline, "-----");
+		old_b = b;
 		b = nextline;
-		if (header != NULL && fin != NULL && header < fin) {
-			ctrl->alloc_header = s_alloc_and_copy(header, fin);
+		if (header && fin && header < fin) {
+			ctrl->header = special_str_copy(header, fin);
 
-			DBG("Found header opening '%s'", ctrl->alloc_header)
+			DBG("Found header opening '%s'", ctrl->header)
 
 			break;
 		}
-	} while (nextline != NULL);
+	} while (nextline);
 
-	if (nextline == NULL) {
-		if (ctrl->alloc_header == NULL) {
-			ctrl->alloc_header = malloc(1);
-			ctrl->alloc_header[0] = '\0';
+	int rogue_chars_sequence = 0;
+	if (ctrl->header) {
+		while (b0 < old_b && (*b0 == '\n' || *b0 == '\r' || isblank(*b0)))
+			++b0;
+		if (b0 != old_b) {
+			nextline = old_b;
+			rogue_chars_sequence = 1;
+			free(ctrl->header);
+			ctrl->header = NULL;
+		}
+	}
+
+	if (!nextline || rogue_chars_sequence) {
+		if (!ctrl->header || rogue_chars_sequence) {
+			if (!ctrl->header) {
+				ctrl->header = malloc(1);
+				ctrl->header[0] = '\0';
+			}
 			DBG("Status set to PEM_NO_PEM_INFORMATION")
 			ctrl->status = PEM_NO_PEM_INFORMATION;
 		} else {
 			DBG("Status set to PEM_PARSE_ERROR")
 			ctrl->status = PEM_PARSE_ERROR;
 		}
-		ctrl->remanent_data_current = NULL;
+		ctrl->data_current = nextline;
 		DBG("pem_next(): returning 1")
 		return 1;
 	}
@@ -278,7 +323,7 @@ int pem_next(pem_ctrl_t *ctrl)
 	const unsigned char *salt_begin = NULL;
 	const unsigned char *salt_end = NULL;
 
-	if (header == NULL) {
+	if (!header) {
 		DBG("No Proc-Type in the line next to header: assuming clear data")
 	} else {
 		DBG("Found Proc-Type in the line next to header")
@@ -294,14 +339,14 @@ int pem_next(pem_ctrl_t *ctrl)
 				while (isblank(*header))
 					++header;
 				const unsigned char *fin = str_rightis(header, &nextline, "encrypted");
-				if (header == fin && nextline != NULL) {
+				if (header == fin && nextline) {
 					proc_type_is_set_for_encryption = 1;
 
 					DBG("Proc-Type content is set for encryption ('4,ENCRYPTED')")
 
 					b = nextline;
 					const unsigned char *h2;
-					if ((h2 = str_leftis(b, "dek-info:")) != NULL) {
+					if ((h2 = str_leftis(b, "dek-info:"))) {
 
 						DBG("Found Dek-Info")
 
@@ -337,9 +382,9 @@ int pem_next(pem_ctrl_t *ctrl)
 /*    DBG("A- b: [%c] %d, [%c] %d, [%c] %d, [%c] %d, [%c] %d", b[0], b[0], b[1], b[1], b[2], b[2], b[3], b[3], b[4], b[4])*/
 
 	int got_empty_line_after_dek_info = 0;
-	if (has_proc_type && cipher_begin != NULL) {
+	if (has_proc_type && cipher_begin) {
 		str_rightis(b, &nextline, "");
-		if (nextline != NULL) {
+		if (nextline) {
 			b = nextline;
 			if (b[0] == '\n') {
 				got_empty_line_after_dek_info = 1;
@@ -355,12 +400,20 @@ int pem_next(pem_ctrl_t *ctrl)
 		}
 	}
 
-	if (cipher_begin != NULL) {
+	int salt_is_ok = 1;
+	if (cipher_begin) {
 		if (cipher_end > cipher_begin)
-			ctrl->alloc_cipher = s_alloc_and_copy(cipher_begin, cipher_end);
-		if (salt_begin != NULL) {
-			if (salt_end > salt_begin)
-				ctrl->alloc_salt = s_alloc_and_copy(salt_begin, salt_end);
+			ctrl->cipher = special_str_copy(cipher_begin, cipher_end);
+		if (salt_begin) {
+			if (salt_end > salt_begin) {
+				char *str_salt = special_str_copy(salt_begin, salt_end);
+				pem_alloc_and_read_hexa(str_salt, SALT_MINIMUM_BYTES, &ctrl->salt, &ctrl->salt_len);
+				if (!ctrl->salt) {
+					ctrl->salt_len = 0; /* Already done by pem_alloc_and_read_hexa, yes */
+					salt_is_ok = 0;
+				}
+				free(str_salt);
+			}
 		}
 	}
 
@@ -373,34 +426,34 @@ int pem_next(pem_ctrl_t *ctrl)
 	do {
 		const unsigned char *h = str_leftis(b, "-----end ");
 		const unsigned char *fin = str_rightis(b, &nextline, "-----");
-		if (h != NULL && fin != NULL && h < fin) {
-			char *header_closure = s_alloc_and_copy(h, fin);
+		if (h && fin && h < fin) {
+			char *header_closure = special_str_copy(h, fin);
 			got_closed = 1;
 			DBG("Found header closure '%s'", header_closure)
 			free(header_closure);
 			break;
 		}
 		b = nextline;
-	} while (nextline != NULL);
+	} while (nextline);
 
-	if (nextline != NULL) {
+	if (nextline) {
 		while (isblank(*nextline) || *nextline == '\n' || *nextline == '\r')
 			++nextline;
 		if (*nextline == '\0')
 			nextline = NULL;
 	}
 
-	if (nextline != NULL) {
+	if (nextline) {
 		DBG("nextline[0] = '%c' (%d)", nextline[0], nextline[0])
 	} else {
 		DBG("nextline is NULL")
 	}
 
-	ctrl->remanent_data_current = nextline;
+	ctrl->data_current = nextline;
 
 	if (got_closed) {
-		ctrl->remanent_index++;
-		DBG("Increasing index. New value = %d", ctrl->remanent_index)
+		ctrl->index++;
+		DBG("Increasing index. New value = %d", ctrl->index)
 
 			/*
 			 * Not a typo.
@@ -408,7 +461,7 @@ int pem_next(pem_ctrl_t *ctrl)
 			 * arrival is 'b - 1' so -1 + 1 => no '+ 1' term.
 			 * */
 		b64_len = b - b64_start;
-		if (has_proc_type && ctrl->alloc_cipher == NULL) {
+		if (has_proc_type && !ctrl->cipher) {
 			if (proc_type_is_set_for_encryption) {
 				DBG("Status set to PEM_MISSING_ENCRYPTION_INFORMATION")
 				ctrl->status = PEM_MISSING_ENCRYPTION_INFORMATION;
@@ -419,18 +472,23 @@ int pem_next(pem_ctrl_t *ctrl)
 		} else if (b64_len == 0) {
 			DBG("Status set to PEM_EMPTY_DATA")
 			ctrl->status = PEM_EMPTY_DATA;
-		} else if (ctrl->alloc_cipher == NULL) {
+		} else if (!ctrl->cipher) {
 			DBG("Status set to PEM_CLEAR_DATA")
 			ctrl->status = PEM_CLEAR_DATA;
 		} else if (got_empty_line_after_dek_info) {
-			DBG("Status set to PEM_ENCRYPTED_DATA")
-			ctrl->status = PEM_ENCRYPTED_DATA;
+			if (!salt_is_ok) {
+				DBG("Status set to PEM_INCORRECT_SALT")
+				ctrl->status = PEM_INCORRECT_SALT;
+			} else {
+				DBG("Status set to PEM_ENCRYPTED_DATA")
+				ctrl->status = PEM_ENCRYPTED_DATA;
+			}
 		} else {
 			DBG("Status set to PEM_MISSING_EMPTY_LINE_AFTER_ENCRYPTION_INFO")
 			ctrl->status = PEM_MISSING_EMPTY_LINE_AFTER_ENCRYPTION_INFO;
 		}
 	} else {
-		ctrl->remanent_data_current = NULL;
+		ctrl->data_current = NULL;
 		DBG("Status set to PEM_PARSE_ERROR")
 		ctrl->status = PEM_PARSE_ERROR;
 	}
@@ -448,7 +506,7 @@ int pem_next(pem_ctrl_t *ctrl)
 
 	DBG("pem_next() part 2: decode BASE64-encoded content found")
 	if (pem_has_data(ctrl)) {
-		if (!pem_base64_decode(b64_start, b64_len, &ctrl->alloc_bin, &ctrl->bin_len)) {
+		if (!pem_base64_decode(b64_start, b64_len, &ctrl->bin, &ctrl->bin_len)) {
 			DBG("Status set to PEM_BAD_BASE64_CONTENT")
 			ctrl->status = PEM_BAD_BASE64_CONTENT;
 		}
@@ -467,13 +525,6 @@ int pem_has_data(const pem_ctrl_t *ctrl)
 int pem_has_encrypted_data(const pem_ctrl_t *ctrl)
 {
 	return ctrl->status == PEM_ENCRYPTED_DATA;
-}
-
-int pem_had_nothing_at_all(const pem_ctrl_t *ctrl)
-{
-	if (ctrl->remanent_data_current != NULL)
-		FATAL_ERROR("pem_had_nothing_at_all() *must* be called when pem_next() loops are over");
-	return ctrl->remanent_index == 0;
 }
 
 static int pem_base64_estimate_decoded_data_len(const unsigned char* b64msg, size_t b64msg_len)
@@ -498,8 +549,7 @@ static int pem_base64_decode(const unsigned char *b64msg, size_t b64msg_len, uns
 
 	*binbuf_len = BIO_read(bio, *binbuf, b64msg_len);
 
-	if (*binbuf_len > allocated_len)
-		FATAL_ERROR("Estimation of BASE64 decoded size was incorrect!");
+	assert(*binbuf_len <= allocated_len);
 
 	BIO_free_all(bio);
 
@@ -513,3 +563,245 @@ static int pem_base64_decode(const unsigned char *b64msg, size_t b64msg_len, uns
 	}
 	return 1;
 }
+
+static int hexchar_to_int(const char c)
+{
+	if (c >= '0' && c <= '9')
+		return c - '0';
+	else if (c >= 'A' && c <= 'F')
+		return (c - 'A') + 10;
+	else if (c >= 'a' && c <= 'f')
+		return (c - 'a') + 10;
+	else
+		return -1;
+}
+
+	/*
+	 * Read a hex string (like "A0F23BB1") and convert into
+	 * a binary block corresponding to the hex string.
+	 * Hex characters can be lower or upper case letters.
+	 *
+	 * The target binary block is allocated and the caller will
+	 * later have to manage freeing it.
+	 *
+	 * If there is an issue in the conversion (illegal characters),
+	 * no allocation is done and *buf and *buf_len are zeroed.
+	 *
+	 * Return 1 if success (meaning, the binary block got allocated
+	 * and contains the binary corresponding to hex string), return 0
+	 * otherwise.
+	 *
+	 * *WARNING*
+	 *   The returned block is *NOT* a string (it is not null-character
+	 *   terminated).
+	 *
+	 */
+int pem_alloc_and_read_hexa(const char *s, int salt_min_bytes, unsigned char **buf, size_t *buf_len)
+{
+	*buf = NULL;
+	*buf_len = 0;
+
+	if (!s)
+		return 0;
+
+	int n = strlen(s);
+	if (n < 2 * salt_min_bytes || n % 2 != 0)
+		return 0;
+
+	*buf_len = n / 2;
+	*buf = malloc(*buf_len);
+	int i;
+	int j = 0;
+	for (i = 0; i < n; i += 2) {
+		int code_hi = hexchar_to_int(s[i]);
+		int code_lo = hexchar_to_int(s[i + 1]);
+		if (code_hi < 0 || code_lo < 0) {
+			free(*buf);
+			*buf = NULL;
+			*buf_len = 0;
+			return 0;
+		}
+		(*buf)[j] = (unsigned char)((code_hi << 4) + code_lo);
+		++j;
+	}
+	assert(j == (int)*buf_len);
+	return 1;
+}
+
+void pem_openssl_start()
+{
+	OpenSSL_add_all_algorithms();
+}
+
+	/*
+	 * the list of functions to call was found here:
+	 *   https://wiki.openssl.org/index.php/Library_Initialization
+	 *
+	 * */
+void pem_openssl_terminate()
+{
+	FIPS_mode_set(0);
+	CONF_modules_unload(1);
+	EVP_cleanup();
+	CRYPTO_cleanup_all_ex_data();
+	ERR_remove_state(0);
+	ERR_free_strings();
+}
+
+int pem_decrypt(const pem_ctrl_t *ctrl, unsigned char **out, int *out_len, const char **errmsg)
+{
+	*out = NULL;
+	*out_len = 0;
+	*errmsg = NULL;
+
+	const EVP_CIPHER *evp_cipher;
+	if (!(evp_cipher = EVP_get_cipherbyname(ctrl->cipher))) {
+		*errmsg = "unable to acquire cipher by its name";
+		DBG("do_decrypt(): set *errmsg to '%s' and returning 0 (FAILURE)", *errmsg)
+		return 0;
+	}
+
+	char *password = NULL;
+	if (ctrl->cb_password_pre) {
+		if (!(password = ctrl->cb_password_pre())) {
+			*errmsg = "no password";
+			DBG("do_decrypt(): set *errmsg to '%s' and returning 0 (FAILURE)", *errmsg)
+			return 0;
+		}
+	}
+
+	EVP_CIPHER_CTX *ctx;
+	if (!(ctx = EVP_CIPHER_CTX_new())) {
+		*errmsg = "unable to initialize cipher context";
+		DBG("do_decrypt(): set *errmsg to '%s' and returning 0 (FAILURE)", *errmsg)
+		if (ctrl->cb_password_post)
+			ctrl->cb_password_post(password);
+		return 0;
+	}
+
+	unsigned char *key = malloc(evp_cipher->key_len);
+	unsigned char *iv = malloc(evp_cipher->iv_len);
+
+	do {
+
+		int nb_bytes;
+		int l = 0;
+		if (password)
+			l = strlen(password);
+		if ((nb_bytes = EVP_BytesToKey(evp_cipher, EVP_md5(), ctrl->salt, (unsigned char *)password, l, 1, key, iv)) < 1) {
+			*errmsg = "could not derive KEY and IV from password and salt";
+			break;
+		}
+
+		if (EVP_DecryptInit_ex(ctx, evp_cipher, NULL, key, ctrl->salt) != 1) {
+			*errmsg = "unable to initialize decryption";
+			break;
+		}
+
+		int outl;
+		*out = malloc(ctrl->bin_len + 256);
+		if (EVP_DecryptUpdate(ctx, *out, &outl, ctrl->bin, ctrl->bin_len) != 1) {
+			*errmsg = "unable to perform decryption";
+			break;
+		}
+		int final_outl;
+		if (EVP_DecryptFinal_ex(ctx, *out + outl, &final_outl) != 1) {
+			*errmsg = "decryption error";
+			break;
+		}
+		*out_len = outl + final_outl;
+
+	} while (0);
+
+	free(iv);
+	free(key);
+	EVP_CIPHER_CTX_free(ctx);
+	if (ctrl->cb_password_post)
+		ctrl->cb_password_post(password);
+
+	if (*errmsg) {
+		if (*out) {
+			free(*out);
+			*out = NULL;
+			*out_len = 0;
+		}
+		DBG("do_decrypt(): set *errmsg to '%s' and returning 0 (FAILURE)", *errmsg)
+		return 0;
+	}
+
+	DBG("do_decrypt(): returning 1 (SUCCESS)")
+	return 1;
+}
+
+void pem_walker(pem_ctrl_t *ctrl, unsigned char **data_out, size_t *data_out_len)
+{
+	DBG("pem_walker() start")
+
+	pem_openssl_start();
+
+	*data_out = NULL;
+	*data_out_len = 0;
+
+	while (pem_next(ctrl)) {
+
+		if (ctrl->cb_loop_top)
+			ctrl->cb_loop_top(ctrl);
+
+		if (!pem_has_data(ctrl))
+			continue;
+
+		unsigned char *data_src;
+		size_t data_src_len;
+		int data_src_is_readonly;
+		if (!pem_has_encrypted_data(ctrl)) {
+			DBG("pem_walker(): data is clear")
+			data_src = (unsigned char *)pem_bin(ctrl);
+			data_src_len = pem_bin_len(ctrl);
+			data_src_is_readonly = 1;
+		} else {
+			DBG("pem_walker(): data is encrypted")
+			data_src = NULL;
+			data_src_len = 0;
+
+			unsigned char *out;
+			int out_len;
+			const char *errmsg;
+			if (pem_decrypt(ctrl, &out, &out_len, &errmsg) == 1) {
+				DBG("pem_walker(): decrypt successful")
+				data_src = out;
+				data_src_len = out_len;
+				data_src_is_readonly = 0;
+				if (ctrl->cb_loop_decrypt)
+					ctrl->cb_loop_decrypt(1, NULL);
+			} else {
+				DBG("pem_walker(): decrypt error: %s", errmsg)
+				if (ctrl->cb_loop_decrypt)
+					ctrl->cb_loop_decrypt(0, errmsg);
+			}
+		}
+
+		if (ctrl->cb_loop_bottom)
+			ctrl->cb_loop_bottom(data_src, data_src_len);
+
+		if (data_src) {
+			DBG("data (was clear or got decrypted) to add to buffer")
+			unsigned char *target;
+			if (!*data_out) {
+				*data_out = malloc(data_src_len);
+				target = *data_out;
+				*data_out_len = 0;
+			} else {
+				*data_out = realloc(*data_out, *data_out_len + data_src_len);
+				target = *data_out + *data_out_len;
+			}
+			memcpy(target, data_src, data_src_len);
+			*data_out_len += data_src_len;
+			if (!data_src_is_readonly)
+				free(data_src);
+		}
+	}
+	pem_openssl_terminate();
+
+	DBG("pem_walker() end")
+}
+
