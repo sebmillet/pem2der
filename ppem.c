@@ -15,7 +15,7 @@
  * =====================================================================================
  */
 
-/*#define DEBUG*/
+/*#define PPEM_DEBUG*/
 
 #include "ppem.h"
 
@@ -37,7 +37,7 @@ static int pem_base64_decode(const unsigned char *b64msg, size_t b64msg_len, uns
 
 #define UNUSED(x) (void)(x)
 
-#ifdef DEBUG
+#ifdef PPEM_DEBUG
 #define DBG(...) \
 {\
 	fprintf(stderr, "%s[%d]\t", __FILE__, __LINE__); \
@@ -65,6 +65,7 @@ struct pem_ctrl_t {
 		/* Fields remanent across calls to pem_next() */
 	int index;
 	const unsigned char *data_current;
+		/* cb = call back */
 	char *(*cb_password_pre)();
 	void (*cb_password_post)(char *password);
 	void (*cb_loop_top)(const pem_ctrl_t *ctrl);
@@ -128,6 +129,11 @@ const char *pem_errorstring(int e)
 		return errorstrings[e];
 }
 
+	/*
+	 * The data_in pointer must contain data that is terminated with a
+	 * '\0' character.
+	 * This assumption is used by pem_next() to detect the end of data_in
+	 * */
 pem_ctrl_t *pem_construct_pem_ctrl(const unsigned char *data_in)
 {
 	pem_ctrl_t *ctrl = malloc(sizeof(pem_ctrl_t));
@@ -141,6 +147,9 @@ pem_ctrl_t *pem_construct_pem_ctrl(const unsigned char *data_in)
 
 	ctrl->cb_password_pre = NULL;
 	ctrl->cb_password_post = NULL;
+	ctrl->cb_loop_top = NULL;
+	ctrl->cb_loop_decrypt = NULL;
+	ctrl->cb_loop_bottom = NULL;
 
 	DBG("pem_construct_pem_ctrl(): constructed one pem_ctrl_t*: %lu", (long unsigned int)ctrl)
 	return ctrl;
@@ -733,7 +742,14 @@ int pem_decrypt(const pem_ctrl_t *ctrl, unsigned char **out, int *out_len, const
 	return 1;
 }
 
-void pem_walker(pem_ctrl_t *ctrl, unsigned char **data_out, size_t *data_out_len)
+	/*
+	 * Perform walk through PEM blocks.
+	 * Uses call back functions to interact as walk moves on.
+	 *
+	 * Returns 0 is no PEM information at all was found (even in error)
+	 * Returns 1 if something (maybe in error, maybe clear, maybe encrypted...) was found
+	 */
+int pem_walker(pem_ctrl_t *ctrl, unsigned char **data_out, size_t *data_out_len)
 {
 	DBG("pem_walker() start")
 
@@ -742,7 +758,13 @@ void pem_walker(pem_ctrl_t *ctrl, unsigned char **data_out, size_t *data_out_len
 	*data_out = NULL;
 	*data_out_len = 0;
 
+	int count = 0;
+	int pem_content = 0;
+
 	while (pem_next(ctrl)) {
+
+		if (ctrl->status != PEM_NO_PEM_INFORMATION)
+			pem_content = 1;
 
 		if (ctrl->cb_loop_top)
 			ctrl->cb_loop_top(ctrl);
@@ -750,14 +772,15 @@ void pem_walker(pem_ctrl_t *ctrl, unsigned char **data_out, size_t *data_out_len
 		if (!pem_has_data(ctrl))
 			continue;
 
+		++count;
+
 		unsigned char *data_src;
 		size_t data_src_len;
-		int data_src_is_readonly;
+		int data_src_is_readonly = 1;
 		if (!pem_has_encrypted_data(ctrl)) {
 			DBG("pem_walker(): data is clear")
 			data_src = (unsigned char *)pem_bin(ctrl);
 			data_src_len = pem_bin_len(ctrl);
-			data_src_is_readonly = 1;
 		} else {
 			DBG("pem_walker(): data is encrypted")
 			data_src = NULL;
@@ -802,6 +825,8 @@ void pem_walker(pem_ctrl_t *ctrl, unsigned char **data_out, size_t *data_out_len
 	}
 	pem_openssl_terminate();
 
-	DBG("pem_walker() end")
+	int r = (count || pem_content);
+	DBG("pem_walker() returning value %d (0 means no PEM content at all, 1 means PEM stuff found)", r)
+	return r;
 }
 

@@ -15,7 +15,14 @@
  * =====================================================================================
  */
 
+#ifndef PPEM_H
+
 #include <stdlib.h>
+
+#ifdef _MSC_VER
+typedef signed long int ssize_t;
+//typedef unsigned long int size_t;
+#endif
 
 	/*
 	 * * ******* *
@@ -50,7 +57,7 @@ void pem_regcb_password(pem_ctrl_t *ctrl, char *(*cb_password_pre)(), void (*cb_
 void pem_regcb_loop_top(pem_ctrl_t *ctrl, void (*cb_loop_top)(const pem_ctrl_t *ctrl));
 void pem_regcb_loop_decrypt(pem_ctrl_t *ctrl, void (*cb_loop_decrypt)(int decrypt_ok, const char *errmsg));
 void pem_regcb_loop_bottom(pem_ctrl_t *ctrl, void (*cb_loop_bottom)(const unsigned char *data_src, size_t data_src_len));
-void pem_walker(pem_ctrl_t *ctrl, unsigned char **data_out, size_t *data_out_len);
+int pem_walker(pem_ctrl_t *ctrl, unsigned char **data_out, size_t *data_out_len);
 
 void pem_destruct_pem_ctrl(pem_ctrl_t *ctrl);
 int pem_next(pem_ctrl_t *ctrl);
@@ -68,5 +75,8 @@ size_t pem_bin_len(const pem_ctrl_t *ctrl);
 int pem_alloc_and_read_hexa(const char *s, int minimum_length, unsigned char **buf, size_t *buf_len);
 void pem_openssl_start();
 void pem_openssl_terminate();
+
 int pem_decrypt(const pem_ctrl_t *ctrl, unsigned char **out, int *out_len, const char **errmsg);
+
+#endif /* PPEM_H */
 

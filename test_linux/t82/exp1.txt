@@ -1,0 +1,20 @@
+[EC PRIVATE 1] (skipped: missing encryption information)
+[EC PRIVATE 2] (encrypted with DES-EDE3-CBC, no salt)
+decryption error
+[EC PRIVATE 3] (skipped: incorrect salt)
+[EC PRIVATE 4] (skipped: incorrect salt)
+[EC PRIVATE 5] (skipped: incorrect salt)
+[EC PRIVATE 6] (encrypted with DES-EDE3-CBC, no salt)
+decryption error
+[EC PRIVATE 7] (skipped: incorrect salt)
+[] (skipped: no PEM information)
+[EC PRIVATE 9] (encrypted with DES-EDE3-CBC, no salt)
+decryption error
+[EC PRIVATE 10] (skipped: unmanaged PEM format)
+[EC PRIVATE 11] (skipped: unmanaged PEM format)
+[EC PRIVATE 12] (skipped: unmanaged PEM format)
+[EC PRIVATE 13] (skipped: unmanaged PEM format)
+[EC PRIVATE 14] (skipped: unmanaged PEM format)
+[EC PRIVATE 15] (skipped: incorrect salt)
+[EC PRIVATE 16] (skipped: non standard encryption information)
+Output data length: 0
